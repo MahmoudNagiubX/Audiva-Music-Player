@@ -1153,7 +1153,180 @@ addSongForm.addEventListener('submit', async (e) => {
     }
 });
 
-// Load songs from IndexedDB and update the UI
+// Trie Node class for efficient search
+class TrieNode {
+    constructor() {
+        this.children = new Map();
+        this.isEndOfWord = false;
+        this.songs = new Set(); // Store song references at each node
+    }
+}
+
+// Trie class for efficient search
+class Trie {
+    constructor() {
+        this.root = new TrieNode();
+    }
+
+    // Insert a word into the trie
+    insert(word, song) {
+        let node = this.root;
+        word = word.toLowerCase();
+        
+        for (let char of word) {
+            if (!node.children.has(char)) {
+                node.children.set(char, new TrieNode());
+            }
+            node = node.children.get(char);
+            node.songs.add(song); // Add song reference at each node
+        }
+        node.isEndOfWord = true;
+    }
+
+    // Search for words with a given prefix
+    search(prefix) {
+        let node = this.root;
+        prefix = prefix.toLowerCase();
+        
+        // Traverse to the last node of the prefix
+        for (let char of prefix) {
+            if (!node.children.has(char)) {
+                return new Set(); // No matches found
+            }
+            node = node.children.get(char);
+        }
+        
+        return node.songs; // Return all songs that match the prefix
+    }
+
+    // Clear the trie
+    clear() {
+        this.root = new TrieNode();
+    }
+}
+
+// Create global Trie instances for different search fields
+const titleTrie = new Trie();
+const artistTrie = new Trie();
+const albumTrie = new Trie();
+
+// Function to build the search tries
+function buildSearchTries() {
+    titleTrie.clear();
+    artistTrie.clear();
+    albumTrie.clear();
+
+    window.songs.forEach(song => {
+        titleTrie.insert(song.title, song);
+        artistTrie.insert(song.artist, song);
+        albumTrie.insert(song.album, song);
+    });
+}
+
+// Modified search functionality using Tries
+function searchSongs(searchTerm) {
+    if (!searchTerm) {
+        return window.songs;
+    }
+
+    // Search in all tries and combine results
+    const titleResults = titleTrie.search(searchTerm);
+    const artistResults = artistTrie.search(searchTerm);
+    const albumResults = albumTrie.search(searchTerm);
+
+    // Combine results using Set to remove duplicates
+    const combinedResults = new Set([...titleResults, ...artistResults, ...albumResults]);
+    return Array.from(combinedResults);
+}
+
+// Search functionality
+const searchInput = document.getElementById('search');
+searchInput.addEventListener('input', (e) => {
+    const searchTerm = e.target.value.toLowerCase();
+    
+    // If we're in a specific view and searching, temporarily show all songs with filtering
+    if (searchTerm) {
+        const filteredSongs = searchSongs(searchTerm);
+        
+        songList.innerHTML = "";
+        filteredSongs.forEach((song) => {
+            const songElement = document.createElement('div');
+            songElement.classList.add('song');
+            songElement.innerHTML = `
+                <img src="${song.image}" alt="${song.title}">
+                <div class="song-title">${song.title}</div>
+                <div class="song-artist">${song.artist}</div>
+                <div class="song-actions">
+                    <button class="add-to-playlist-btn" title="Add to Playlist">
+                        <i class="fas fa-plus"></i>
+                    </button>
+                    <button class="delete-song-btn" title="Delete Song"><i class="fas fa-trash"></i></button>
+                </div>
+            `;
+            
+            // Play on click (not on action buttons)
+            songElement.addEventListener('click', function(e) {
+                if (e.target.closest('.song-actions')) return;
+                if (queue.contains(song.title)) {
+                    // If song is already in queue, play it
+                    const indexInQueue = queue.songs.findIndex(queuedSong => queuedSong.title === song.title);
+                    if (indexInQueue !== -1) {
+                        // If it's not the first song in queue, move it to the front
+                        if (indexInQueue > 0) {
+                            const songToPlay = queue.songs.splice(indexInQueue, 1)[0];
+                            queue.songs.unshift(songToPlay);
+                        }
+                        playSongFromQueue();
+                    }
+                } else {
+                    // First click - add to queue
+                    addToQueue(song);
+                    showNotification(`"${song.title}" added to queue. Click again to play.`, 'var(--primary)', '<i class="fas fa-plus"></i>');
+                }
+            });
+
+            // Add to playlist button
+            const addToPlaylistBtn = songElement.querySelector('.add-to-playlist-btn');
+            addToPlaylistBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                showPlaylistSelectionMenu(song);
+            });
+
+            // Delete button logic
+            const deleteBtn = songElement.querySelector('.delete-song-btn');
+            deleteBtn.addEventListener('click', async function(e) {
+                e.stopPropagation();
+                if (!confirm(`Are you sure you want to delete "${song.title}"?`)) return;
+                try {
+                    await window.audivaDB.deleteSongFromDB(song.id);
+                    // Remove from queue
+                    queue.songs = queue.songs.filter(qs => qs.id !== song.id);
+                    // Remove from favorites
+                    favorites = favorites.filter(f => !(f.title === song.title && f.artist === song.artist));
+                    saveFavorites();
+                    // If currently playing, stop
+                    if (window.songs[currentSongIndex] && window.songs[currentSongIndex].id === song.id) {
+                        audioElement.pause();
+                        audioElement.src = '';
+                        document.getElementById('current-song-title').textContent = 'Not Playing';
+                        document.getElementById('current-album-art').src = 'Photos/Spotify_icon.png';
+                        document.querySelector('.song-info .artist').textContent = 'Select a song to play';
+                    }
+                    await loadSongsFromIndexedDB();
+                    showNotification('Song deleted successfully!', 'var(--primary)', '<i class="fas fa-trash"></i>');
+                } catch (err) {
+                    showNotification(err.message || 'Failed to delete song.', 'var(--primary)', '<i class="fas fa-trash"></i>');
+                }
+            });
+            songList.appendChild(songElement);
+        });
+    } else {
+        // If search is cleared, return to current view
+        loadView(currentView);
+    }
+});
+
+// Modify loadSongsFromIndexedDB to build the search tries
 async function loadSongsFromIndexedDB() {
     try {
         const dbSongs = await window.audivaDB.getAllSongsFromDB();
@@ -1163,6 +1336,10 @@ async function loadSongsFromIndexedDB() {
             image: URL.createObjectURL(song.imageBlob),
             artist_image: URL.createObjectURL(song.artistImageBlob)
         }));
+        
+        // Build the search tries after loading songs
+        buildSearchTries();
+        
         loadPlaylists();
         updatePlaylistsList();
         loadView(currentView);
@@ -1494,93 +1671,6 @@ volumeSlider.addEventListener('input', handleVolumeChange);
 audioElement.volume = volumeSlider.value / 100;
 volumeSlider.style.background = `linear-gradient(to right, #8A2BE2 ${volumeSlider.value}%, #2d2d2d ${volumeSlider.value}%)`;
 
-// Search functionality
-const searchInput = document.getElementById('search');
-searchInput.addEventListener('input', (e) => {
-    const searchTerm = e.target.value.toLowerCase();
-    
-    // If we're in a specific view and searching, temporarily show all songs with filtering
-    if (searchTerm) {
-        const filteredSongs = window.songs.filter(song => 
-            song.title.toLowerCase().includes(searchTerm) || 
-            song.artist.toLowerCase().includes(searchTerm) || 
-            song.album.toLowerCase().includes(searchTerm)
-        );
-        
-        songList.innerHTML = "";
-        filteredSongs.forEach((song) => {
-            const songElement = document.createElement('div');
-            songElement.classList.add('song');
-            songElement.innerHTML = `
-                <img src="${song.image}" alt="${song.title}">
-                <div class="song-title">${song.title}</div>
-                <div class="song-artist">${song.artist}</div>
-                <div class="song-actions">
-                    <button class="add-to-playlist-btn" title="Add to Playlist">
-                        <i class="fas fa-plus"></i>
-                    </button>
-                    <button class="delete-song-btn" title="Delete Song"><i class="fas fa-trash"></i></button>
-                </div>
-            `;
-            // Play on click (not on action buttons)
-            songElement.addEventListener('click', function(e) {
-                if (e.target.closest('.song-actions')) return;
-                if (queue.contains(song.title)) {
-                    // If song is already in queue, play it
-                    const indexInQueue = queue.songs.findIndex(queuedSong => queuedSong.title === song.title);
-                    if (indexInQueue !== -1) {
-                        // If it's not the first song in queue, move it to the front
-                        if (indexInQueue > 0) {
-                            const songToPlay = queue.songs.splice(indexInQueue, 1)[0];
-                            queue.songs.unshift(songToPlay);
-                        }
-                        playSongFromQueue();
-                    }
-                } else {
-                    // First click - add to queue
-                    addToQueue(song);
-                    showNotification(`"${song.title}" added to queue. Click again to play.`, 'var(--primary)', '<i class="fas fa-plus"></i>');
-                }
-            });
-            // Add to playlist button
-            const addToPlaylistBtn = songElement.querySelector('.add-to-playlist-btn');
-            addToPlaylistBtn.addEventListener('click', function(e) {
-                e.stopPropagation();
-                showPlaylistSelectionMenu(song);
-            });
-            // Delete button logic
-            const deleteBtn = songElement.querySelector('.delete-song-btn');
-            deleteBtn.addEventListener('click', async function(e) {
-                e.stopPropagation();
-                if (!confirm(`Are you sure you want to delete "${song.title}"?`)) return;
-                try {
-                    await window.audivaDB.deleteSongFromDB(song.id);
-                    // Remove from queue
-                    queue.songs = queue.songs.filter(qs => qs.id !== song.id);
-                    // Remove from favorites
-                    favorites = favorites.filter(f => !(f.title === song.title && f.artist === song.artist));
-                    saveFavorites();
-                    // If currently playing, stop
-                    if (window.songs[currentSongIndex] && window.songs[currentSongIndex].id === song.id) {
-                        audioElement.pause();
-                        audioElement.src = '';
-                        document.getElementById('current-song-title').textContent = 'Not Playing';
-                        document.getElementById('current-album-art').src = 'Photos/Spotify_icon.png';
-                        document.querySelector('.song-info .artist').textContent = 'Select a song to play';
-                    }
-                    await loadSongsFromIndexedDB();
-                    showNotification('Song deleted successfully!', 'var(--primary)', '<i class="fas fa-trash"></i>');
-                } catch (err) {
-                    showNotification(err.message || 'Failed to delete song.', 'var(--primary)', '<i class="fas fa-trash"></i>');
-                }
-            });
-            songList.appendChild(songElement);
-        });
-    } else {
-        // If search is cleared, return to current view
-        loadView(currentView);
-    }
-});
 // Initialize the player
 loadSongs();
 updateFavorites();
